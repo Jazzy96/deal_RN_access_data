@@ -19,3 +19,5 @@ python-dateutil>=2.8.2
 pytz>=2020.1
 six>=1.5 
 xlsx2csv==0.8.4
+typing-extensions==4.5.0
+pydantic==1.10.11
