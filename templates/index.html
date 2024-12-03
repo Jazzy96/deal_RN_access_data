@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SkyNet接入情况分析工具</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <style>
+        :root {
+            --primary-color: #4CAF50;
+            --secondary-color: #2196F3;
+            --error-color: #f44336;
+            --success-color: #4CAF50;
+            --background-color: #f5f5f5;
+            --card-background: #ffffff;
+        }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: var(--background-color);
+            color: #333;
+            line-height: 1.6;
+        }
+        h1 {
+            color: var(--primary-color);
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .upload-form {
+            background-color: var(--card-background);
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            padding: 30px;
+            text-align: center;
+            margin: 20px 0;
+            transition: box-shadow 0.3s ease;
+        }
+        .upload-form:hover {
+            box-shadow: 0 6px 8px rgba(0, 0, 0, 0.15);
+        }
+        .upload-form h3 {
+            margin-top: 0;
+            color: var(--secondary-color);
+        }
+        input[type="file"] {
+            display: none;
+        }
+        .file-input-label {
+            display: inline-block;
+            padding: 10px 20px;
+            background-color: var(--secondary-color);
+            color: white;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background-color 0.3s ease;
+        }
+        .file-input-label:hover {
+            background-color: #1976D2;
+        }
+        input[type="submit"] {
+            background-color: var(--primary-color);
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            transition: background-color 0.3s ease;
+        }
+        input[type="submit"]:hover {
+            background-color: #45a049;
+        }
+        .message {
+            padding: 15px;
+            margin: 15px 0;
+            border-radius: 4px;
+            font-weight: bold;
+        }
+        .error {
+            background-color: #ffebee;
+            border: 1px solid var(--error-color);
+            color: var(--error-color);
+        }
+        .success {
+            background-color: #e8f5e9;
+            border: 1px solid var(--success-color);
+            color: var(--success-color);
+        }
+        .progress-container {
+            margin: 20px 0;
+            display: none;
+        }
+        .progress-bar {
+            width: 100%;
+            height: 10px;
+            background-color: #e0e0e0;
+            border-radius: 5px;
+            overflow: hidden;
+        }
+        .progress {
+            width: 0%;
+            height: 100%;
+            background-color: var(--primary-color);
+            transition: width 0.3s ease-in-out;
+        }
+        .status {
+            margin-top: 10px;
+            font-size: 14px;
+            color: #666;
+        }
+        #fileList {
+            text-align: left;
+            margin: 15px 0;
+            padding: 10px;
+            background-color: #e8eaf6;
+            border-radius: 4px;
+        }
+        #fileList ul {
+            list-style-type: none;
+            padding: 0;
+        }
+        #fileList li {
+            margin-bottom: 5px;
+        }
+        a {
+            color: var(--secondary-color);
+            text-decoration: none;
+        }
+        a:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <h1>SkyNet接入情况分析工具</h1>
+
+    <div class="upload-form">
+        <form id="uploadForm" enctype="multipart/form-data">
+            <h3>请选择Excel文件上传（支持多文件）</h3>
+            <label for="fileInput" class="file-input-label">选择文件</label>
+            <input id="fileInput" type="file" name="files" accept=".xlsx" multiple required>
+            <div id="fileList"></div>
+            <br><br>
+            <input type="submit" value="上传并分析">
+        </form>
+    </div>
+
+    <div class="progress-container" id="progressContainer">
+        <div class="progress-bar">
+            <div class="progress" id="progressBar"></div>
+        </div>
+        <div class="status" id="status">准备处理...</div>
+    </div>
+
+    <div id="messages"></div>
+
+    <script>
+        // 保持原有的 JavaScript 代码不变
+        const socket = io();
+        const form = document.getElementById('uploadForm');
+        const fileInput = document.getElementById('fileInput');
+        const fileList = document.getElementById('fileList');
+        const progressContainer = document.getElementById('progressContainer');
+        const progressBar = document.getElementById('progressBar');
+        const status = document.getElementById('status');
+        const messages = document.getElementById('messages');
+
+        fileInput.addEventListener('change', function(e) {
+            const files = e.target.files;
+            let fileListHtml = '<ul>';
+            let totalSize = 0;
+
+            for(let file of files) {
+                const sizeMB = (file.size / (1024 * 1024)).toFixed(2);
+                if (sizeMB > 300) {
+                    alert(`文件 ${file.name} 超过300MB限制！`);
+                    e.target.value = '';
+                    return;
+                }
+                totalSize += file.size;
+                fileListHtml += `<li>${file.name} (${sizeMB} MB)</li>`;
+            }
+            fileListHtml += '</ul>';
+            fileList.innerHTML = fileListHtml;
+        });
+
+        form.onsubmit = async (e) => {
+            e.preventDefault();
+            const formData = new FormData(form);
+
+            progressContainer.style.display = 'block';
+            progressBar.style.width = '0%';
+            status.textContent = '开始上传文件...';
+            messages.innerHTML = '';
+
+            try {
+                const response = await fetch('/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const result = await response.json();
+
+                if (result.error) {
+                    showMessage(result.error, 'error');
+                } else if (result.success) {
+                    showMessage('处理完成！<a href="/download/' + result.success + '">点击下载结果</a>', 'success');
+                }
+            } catch (error) {
+                showMessage('上传失败：' + error.message, 'error');
+            }
+        };
+
+        socket.on('progress', function(data) {
+            progressBar.style.width = data.progress + '%';
+            status.textContent = data.status;
+
+            // 如果处理完成，启用下载按钮
+            if (data.progress === 100) {
+                document.querySelector('input[type="submit"]').disabled = false;
+            } else {
+                document.querySelector('input[type="submit"]').disabled = true;
+            }
+        });
+
+        form.onsubmit = async (e) => {
+            e.preventDefault();
+            const formData = new FormData(form);
+
+            // 禁用提交按钮
+            document.querySelector('input[type="submit"]').disabled = true;
+
+            progressContainer.style.display = 'block';
+            progressBar.style.width = '0%';
+            status.textContent = '开始处理文件...';
+            messages.innerHTML = '';
+
+            try {
+                const response = await fetch('/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const result = await response.json();
+
+                if (result.error) {
+                    showMessage(result.error, 'error');
+                } else if (result.success) {
+                    showMessage('处理完成！<a href="/download/' + result.success + '">点击下载结果</a>', 'success');
+                }
+            } catch (error) {
+                showMessage('上传失败：' + error.message, 'error');
+            } finally {
+                // 重新启用提交按钮
+                document.querySelector('input[type="submit"]').disabled = false;
+            }
+        };
+
+        function showMessage(message, type) {
+            messages.innerHTML = `<div class="message ${type}">${message}</div>`;
+        }
+    </script>
+</body>
+</html>
