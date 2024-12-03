@@ -6,7 +6,6 @@
 from flask import Flask, render_template, request, send_file, jsonify
 from flask_socketio import SocketIO
 import os
-import pandas as pd
 import logging
 from pathlib import Path
 from werkzeug.utils import secure_filename
@@ -18,6 +17,8 @@ import json
 from dotenv import load_dotenv
 from wifi_processor import process_wifi_data, format_worksheet
 import sys
+import polars as pl
+from openpyxl import Workbook
 
 # 加载 .env 文件（仅在本地开发时需要）
 if os.path.exists('.env'):
@@ -104,74 +105,86 @@ def upload_files():
         
         # 创建一个内存中的Excel writer
         output_buffer = BytesIO()
-        with pd.ExcelWriter(output_buffer, engine='openpyxl') as writer:
-            for file in files:
-                if not allowed_file(file.filename):
-                    continue
+        
+        # 创建一个字典来存储所有处理后的数据框
+        all_dataframes = {}
+        
+        for file in files:
+            if not allowed_file(file.filename):
+                continue
 
-                filename = secure_filename(file.filename)
+            filename = secure_filename(file.filename)
+            
+            with app.app_context():
+                emit_progress(
+                    int((processed_files * 100) / total_files),
+                    f'正在处理: {filename}'
+                )
+
+            try:
+                file_content = BytesIO(file.read())
+                result_df = process_wifi_data(file_content)
                 
-                # 更新状态为开始处理当前文件
-                with app.app_context():
-                    emit_progress(
-                        int((processed_files * 100) / total_files),
-                        f'正在处理: {filename}'
-                    )
+                sheet_name = os.path.splitext(filename)[0][:31]
 
-                try:
-                    # 将文件内容读入内存
-                    file_content = BytesIO(file.read())
-                    
-                    # 处理文件
-                    result_df = process_wifi_data(file_content)
-                    
-                    sheet_name = os.path.splitext(filename)[0][:31]
-
-                    if result_df is not None and not result_df.empty:
-                        result_df.to_excel(writer, sheet_name=sheet_name, index=False)
-                        worksheet = writer.sheets[sheet_name]
-                        format_worksheet(worksheet)
-                        # 更新状态为处理成功
-                        with app.app_context():
-                            emit_progress(
-                                int(((processed_files + 1) * 100) / total_files),
-                                f'已完成处理: {filename}'
-                            )
-                    else:
-                        # 更新状态为处理失败
-                        with app.app_context():
-                            emit_progress(
-                                int(((processed_files + 1) * 100) / total_files),
-                                f'文件 {filename} 处理失败：没有有效数据'
-                            )
-                        pd.DataFrame([["没有有效数据"]]).to_excel(
-                            writer,
-                            sheet_name=sheet_name,
-                            index=False,
-                            header=False
-                        )
-
-                except Exception as e:
-                    logger.error(f"Error processing file {filename}: {str(e)}")
-                    # 更新状态为处理错误
+                if result_df is not None and not result_df.is_empty():
+                    all_dataframes[sheet_name] = result_df
                     with app.app_context():
                         emit_progress(
                             int(((processed_files + 1) * 100) / total_files),
-                            f'文件 {filename} 处理出错: {str(e)}'
+                            f'已完成处理: {filename}'
                         )
-                    error_sheet_name = sheet_name if 'sheet_name' in locals() else f"error_{processed_files}"
-                    pd.DataFrame([[f"处理出错: {str(e)}"]]).to_excel(
-                        writer,
-                        sheet_name=error_sheet_name[:31],
-                        index=False,
-                        header=False
+                else:
+                    with app.app_context():
+                        emit_progress(
+                            int(((processed_files + 1) * 100) / total_files),
+                            f'文件 {filename} 处理失败：没有有效数据'
+                        )
+                    all_dataframes[sheet_name] = pl.DataFrame({"message": ["没有有效数据"]})
+
+            except Exception as e:
+                logger.error(f"Error processing file {filename}: {str(e)}")
+                with app.app_context():
+                    emit_progress(
+                        int(((processed_files + 1) * 100) / total_files),
+                        f'文件 {filename} 处理出错: {str(e)}'
                     )
+                error_sheet_name = sheet_name if 'sheet_name' in locals() else f"error_{processed_files}"
+                all_dataframes[error_sheet_name[:31]] = pl.DataFrame({"message": [f"处理出错: {str(e)}"]})
 
-                finally:
-                    processed_files += 1
+            finally:
+                processed_files += 1
 
-        # 上传结果文件到R2
+        # 创建一个新的Excel工作簿
+        wb = Workbook()
+        # 删除默认创建的sheet
+        wb.remove(wb.active)
+        
+        # 将所有数据框写入Excel文件
+        for sheet_name, df in all_dataframes.items():
+            # 创建新的worksheet
+            ws = wb.create_sheet(title=sheet_name)
+            
+            # 写入表头
+            headers = df.columns
+            for col_idx, header in enumerate(headers, 1):
+                ws.cell(row=1, column=col_idx, value=header)
+            
+            # 写入数据
+            data = df.to_numpy()
+            for row_idx, row_data in enumerate(data, 2):
+                for col_idx, value in enumerate(row_data, 1):
+                    ws.cell(row=row_idx, column=col_idx, value=value)
+            
+            # 应用格式化
+            format_worksheet(ws)
+
+        # 保存到BytesIO
+        output_buffer = BytesIO()
+        wb.save(output_buffer)
         output_buffer.seek(0)
+
+        # 上传到R2
         r2_key = f'{session_id}/{output_filename}'
         s3_client.put_object(
             Bucket=R2_CONFIG['bucket_name'],

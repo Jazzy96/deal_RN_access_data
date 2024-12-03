@@ -1,5 +1,4 @@
-import pandas as pd
-import os
+import polars as pl
 from datetime import datetime
 from tqdm import tqdm
 from openpyxl.styles import Alignment
@@ -14,7 +13,7 @@ def process_wifi_data(file_path):
     try:
         # 读取Excel文件
         print(f"\n正在处理 {file_path}...")
-        df = pd.read_excel(file_path)
+        df = pl.read_excel(file_path)
         total_rows = len(df)
         print(f"总行数: {total_rows}")
 
@@ -23,7 +22,7 @@ def process_wifi_data(file_path):
             return None
 
         # 1. 过滤掉user不为空的行，并保留需要的列
-        df = df[df['user'].isna()][['serial_no', 'mac', 'signal', 'tx_rate', 'rx_rate', 'create_time']]
+        df = df.filter(pl.col('user').is_null()).select(['serial_no', 'mac', 'signal', 'tx_rate', 'rx_rate', 'create_time'])
         valid_rows = len(df)
         print(f"有效行数: {valid_rows} (已过滤user不为空的行)")
 
@@ -32,11 +31,11 @@ def process_wifi_data(file_path):
             return None
 
         # 将create_time转换为datetime类型
-        df['create_time'] = pd.to_datetime(df['create_time'])
+        df = df.with_columns(pl.col('create_time').str.strptime(pl.Datetime))
 
         # 按MAC地址分组并排序
-        df = df.sort_values(['mac', 'create_time'])
-        unique_macs = df['mac'].nunique()
+        df = df.sort(['mac', 'create_time'])
+        unique_macs = df['mac'].n_unique()
         print(f"不同MAC地址数量: {unique_macs}")
 
         if unique_macs == 0:
@@ -46,19 +45,19 @@ def process_wifi_data(file_path):
         results = []
 
         print("\n开始处理每个MAC地址的数据...")
-        for mac, group in tqdm(df.groupby('mac'), total=unique_macs, desc="处理进度"):
+        for mac, group in df.groupby('mac', maintain_order=True):
             if len(group) < 2:  # 如果某个MAC只有一条记录，跳过
                 continue
 
-            times = group['create_time'].tolist()
+            times = group['create_time'].to_list()
             segment_start_idx = 0
 
             for i in range(1, len(times)):
                 time_diff = (times[i] - times[i-1]).total_seconds()
                 if time_diff > 300:  # 5分钟阈值
                     # 处理当前段
-                    segment = group.iloc[segment_start_idx:i]
-                    sn = segment['serial_no'].iloc[0]
+                    segment = group.slice(segment_start_idx, i - segment_start_idx)
+                    sn = segment['serial_no'][0]
                     avg_signal = segment['signal'].mean()
                     avg_tx_rate = segment['tx_rate'].mean()
                     avg_rx_rate = segment['rx_rate'].mean()
@@ -67,9 +66,9 @@ def process_wifi_data(file_path):
                     results.append({
                         'SN': sn,
                         'mac': mac,
-                        'avg_signal': round(avg_signal, 2),
-                        'avg_tx_rate': round(avg_tx_rate, 2),
-                        'avg_rx_rate': round(avg_rx_rate, 2),
+                        'avg_signal': round(float(avg_signal), 2),
+                        'avg_tx_rate': round(float(avg_tx_rate), 2),
+                        'avg_rx_rate': round(float(avg_rx_rate), 2),
                         'total_duration(hour)': format_duration_hours(duration),
                         'start_time': times[segment_start_idx]
                     })
@@ -77,8 +76,8 @@ def process_wifi_data(file_path):
                     segment_start_idx = i
 
             # 处理最后一段
-            segment = group.iloc[segment_start_idx:]
-            sn = segment['serial_no'].iloc[0]
+            segment = group.slice(segment_start_idx)
+            sn = segment['serial_no'][0]
             avg_signal = segment['signal'].mean()
             avg_tx_rate = segment['tx_rate'].mean()
             avg_rx_rate = segment['rx_rate'].mean()
@@ -87,9 +86,9 @@ def process_wifi_data(file_path):
             results.append({
                 'SN': sn,
                 'mac': mac,
-                'avg_signal': round(avg_signal, 2),
-                'avg_tx_rate': round(avg_tx_rate, 2),
-                'avg_rx_rate': round(avg_rx_rate, 2),
+                'avg_signal': round(float(avg_signal), 2),
+                'avg_tx_rate': round(float(avg_tx_rate), 2),
+                'avg_rx_rate': round(float(avg_rx_rate), 2),
                 'total_duration(hour)': format_duration_hours(duration),
                 'start_time': times[segment_start_idx]
             })
@@ -98,16 +97,10 @@ def process_wifi_data(file_path):
             print("警告：没有生成任何结果！")
             return None
 
-        # 创建结果DataFrame并按总使用时长排序
-        result_df = pd.DataFrame(results)
-
-        # 按小时数排序
-        #result_df = result_df.sort_values('total_duration(hour)', ascending=False)
-
-        # 按开始时间排序
-        result_df = result_df.sort_values('start_time', ascending=True)
-
+        # 创建结果DataFrame并按开始时间排序
+        result_df = pl.DataFrame(results).sort('start_time')
         return result_df
+
     except Exception as e:
         print(f"处理文件 {file_path} 时发生错误: {str(e)}")
         return None
