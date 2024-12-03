@@ -157,8 +157,11 @@
     <div id="messages"></div>
 
     <script>
-        // 保持原有的 JavaScript 代码不变
-        const socket = io();
+        // 修改Socket.IO连接配置
+        const socket = io({
+            transports: ['websocket'],
+            upgrade: false
+        });
         const form = document.getElementById('uploadForm');
         const fileInput = document.getElementById('fileInput');
         const fileList = document.getElementById('fileList');

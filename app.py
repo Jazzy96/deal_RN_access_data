@@ -1,6 +1,6 @@
 # 首先导入和执行 eventlet monkey patch
-import eventlet
-eventlet.monkey_patch()
+# import eventlet
+# eventlet.monkey_patch()
 
 # 然后导入其他模块
 from flask import Flask, render_template, request, send_file, jsonify
@@ -17,13 +17,18 @@ from io import BytesIO
 import json
 from dotenv import load_dotenv
 from wifi_processor import process_wifi_data, format_worksheet
+import sys
 
 # 加载 .env 文件（仅在本地开发时需要）
 if os.path.exists('.env'):
     load_dotenv()
 
-# 设置日志
-logging.basicConfig(level=logging.DEBUG)
+# 配置日志
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    stream=sys.stdout  # Vercel会捕获stdout的输出
+)
 logger = logging.getLogger(__name__)
 
 # 创建Flask应用
@@ -38,7 +43,7 @@ if not os.path.exists(UPLOAD_FOLDER):
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
 # 初始化SocketIO
-socketio = SocketIO(app, async_mode='eventlet')
+socketio = SocketIO(app, async_mode='threading', cors_allowed_origins="*")
 
 ALLOWED_EXTENSIONS = {'xlsx'}
 
@@ -224,5 +229,17 @@ def download_file(session_id, filename):
         logger.error(f"Error downloading file: {str(e)}", exc_info=True)
         return jsonify({'error': f'下载文件时发生错误: {str(e)}'})
 
+@app.errorhandler(Exception)
+def handle_error(error):
+    logger.error(f"Unhandled error: {str(error)}", exc_info=True)
+    return jsonify({
+        "error": "Internal server error",
+        "message": str(error)
+    }), 500
+
 if __name__ == '__main__':
-    socketio.run(app, host='0.0.0.0', port=5678)
+    # 本地开发时使用
+    app.run(host='0.0.0.0', port=5678)
+else:
+    # Vercel部署时使用
+    app = app
